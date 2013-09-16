@@ -36,7 +36,7 @@ func main() {
 
 		pprof.StartCPUProfile(f)
 		defer pprof.StopCPUProfile()
-	} else if false {
+	} else {
 		runtime.GOMAXPROCS(runtime.NumCPU())
 	}
 

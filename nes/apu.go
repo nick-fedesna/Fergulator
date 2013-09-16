@@ -62,7 +62,7 @@ type Square struct {
 	Length        Word
 	LastTick      int
 	SweepEnabled  bool
-	Sweep         Word
+	SweepPeriod   Word
 	SweepCounter  Word
 	SweepMode     Word
 	Shift         Word
@@ -110,7 +110,7 @@ type Dmc struct {
 	Data           Word
 	Sample         int16
 	SampleAddress  int
-	CurrentAddress int
+	CurrentAddress uint16
 	SampleLength   int
 	SampleCounter  int
 	ShiftCounter   int
@@ -163,8 +163,8 @@ func (s *Square) WriteControl(v Word) {
 
 func (s *Square) WriteSweeps(v Word) {
 	s.SweepEnabled = v&0x80 == 0x80
-	s.Sweep = ((v >> 4) & 0x7)
-	s.SweepMode = (v >> 3) & 1
+	s.SweepPeriod = (v & 0x7) >> 4
+	s.SweepMode = (v & 1) >> 3
 	s.Negative = v&0x10 == 0x10
 	s.Shift = v & 0x7
 
@@ -213,23 +213,24 @@ func (s *Square) Clock() {
 }
 
 func (s *Square) ClockSweep() {
-	if s.SweepEnabled && s.SweepCounter > 0 {
-		s.SweepCounter--
+	s.SweepCounter--
 
-		delta := (s.Timer >> s.Shift)
+	if s.SweepCounter == 0 {
+		s.SweepCounter = s.SweepPeriod + 1
+		if s.SweepEnabled && s.SweepCounter > 0 && s.Shift > 0 {
+			delta := (s.Timer >> s.Shift)
 
-		if s.SweepCounter == 0 {
 			if s.Negative {
-				s.Timer = s.Timer - delta
+				s.Timer -= delta
 			} else if s.Timer+delta < 0x800 {
-				s.Timer = s.Timer + delta
+				s.Timer += delta
 			}
 		}
 	}
 
 	if s.SweepReload {
 		s.SweepReload = false
-		s.SweepCounter = s.Sweep
+		s.SweepCounter = s.SweepPeriod + 1
 	}
 }
 
@@ -356,7 +357,7 @@ func (d *Dmc) Clock() {
 		d.HasSample = false
 
 		if d.SampleCounter == 0 && d.LoopEnabled {
-			d.CurrentAddress = d.SampleAddress
+			d.CurrentAddress = uint16(d.SampleAddress)
 			d.SampleCounter = d.SampleLength
 		}
 
@@ -593,7 +594,7 @@ func (a *Apu) WriteControlFlags1(v Word) {
 	if v>>4&0x1 == 0x0 {
 		a.Dmc.SampleCounter = 0
 	} else {
-		a.Dmc.CurrentAddress = a.Dmc.SampleAddress
+		a.Dmc.CurrentAddress = uint16(a.Dmc.SampleAddress)
 		a.Dmc.SampleCounter = a.Dmc.SampleLength
 	}
 }

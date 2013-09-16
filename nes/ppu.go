@@ -171,33 +171,30 @@ func (p *Ppu) raster() {
 		y := i / 256
 		x := i - (y * 256)
 
+		bufpx := &p.Palettebuffer[i]
+
 		var color uint32
-		color = p.Palettebuffer[i].Color
+		color = bufpx.Color
 
 		width := 256
 
-		if p.OverscanEnabled {
-			if y < 8 || y > 231 || x < 8 || x > 247 {
-				continue
-			} else {
-				y -= 8
-				x -= 8
-			}
-
-			width = 240
-
-			if len(p.Framebuffer) == 0xF000 {
-				p.Framebuffer = make([]uint32, 0xEFE0)
-			}
+		// Always use overscan
+		if y < 8 || y > 231 || x < 8 || x > 247 {
+			continue
 		} else {
-			if len(p.Framebuffer) == 0xEFE0 {
-				p.Framebuffer = make([]uint32, 0xF000)
-			}
+			y -= 8
+			x -= 8
+		}
+
+		width = 240
+
+		if len(p.Framebuffer) == 0xF000 {
+			p.Framebuffer = make([]uint32, 0xEFE0)
 		}
 
 		p.Framebuffer[(y*width)+x] = color << 8
-		p.Palettebuffer[i].Value = 0
-		p.Palettebuffer[i].Pindex = -1
+		bufpx.Value = 0
+		bufpx.Pindex = -1
 	}
 
 	p.Output <- p.Framebuffer
@@ -272,7 +269,6 @@ func (p *Ppu) Step() {
 		case 304:
 			// Copy scroll latch into VRAMADDR register
 			if p.ShowBackground || p.ShowSprites {
-				// p.VramAddress = (p.VramAddress) | (p.VramLatch & 0x41F)
 				p.VramAddress = p.VramLatch
 			}
 		}
@@ -464,7 +460,7 @@ func (p *Ppu) WriteDma(v Word) {
 	// Fill sprite RAM
 	addr := int(v) * 0x100
 	for i := 0; i < 0x100; i++ {
-		d, _ := Ram.Read(addr + i)
+		d, _ := Ram.Read(uint16(addr + i))
 		p.SpriteRam[i] = d
 		p.updateBufferedSpriteMem(i, d)
 	}
@@ -526,20 +522,18 @@ func (p *Ppu) WriteData(v Word) {
 	} else if p.VramAddress >= 0x2000 && p.VramAddress < 0x3000 {
 		// Nametable mirroring
 		p.Nametables.writeNametableData(p.VramAddress, v)
+	} else if p.VramAddress < 0x2000 {
+		rom.WriteVram(v, p.VramAddress&0x3FFF)
+		// MMC2 latch trigger
+		if v, ok := rom.(*Mmc2); ok {
+			t := p.bgPatternTableAddress(p.Nametables.readNametableData(p.VramAddress))
+			v.LatchTrigger(t)
+		}
 	} else {
 		p.Vram[p.VramAddress&0x3FFF] = v
-		// MMC2 latch trigger
-		t := p.bgPatternTableAddress(p.Nametables.readNametableData(p.VramAddress))
-		triggerMapperLatch(t)
 	}
 
 	p.incrementVramAddress()
-}
-
-func triggerMapperLatch(i int) {
-	if v, ok := rom.(*Mmc2); ok {
-		v.LatchTrigger(i)
-	}
 }
 
 // $2007
@@ -551,12 +545,16 @@ func (p *Ppu) ReadData() (r Word, err error) {
 		p.VramDataBuffer = p.Nametables.readNametableData(p.VramAddress)
 	} else if p.VramAddress < 0x3F00 {
 		r = p.VramDataBuffer
-		p.VramDataBuffer = p.Vram[p.VramAddress]
 
 		if p.VramAddress < 0x2000 {
+			p.VramDataBuffer = rom.ReadVram(p.VramAddress)
 			// MMC2 latch trigger
-			t := p.bgPatternTableAddress(p.Nametables.readNametableData(p.VramAddress))
-			triggerMapperLatch(t)
+			if v, ok := rom.(*Mmc2); ok {
+				t := p.bgPatternTableAddress(p.Nametables.readNametableData(p.VramAddress))
+				v.LatchTrigger(t)
+			}
+		} else {
+			p.VramDataBuffer = p.Vram[p.VramAddress]
 		}
 	} else {
 		bufferAddress := p.VramAddress - 0x1000
@@ -576,8 +574,10 @@ func (p *Ppu) ReadData() (r Word, err error) {
 
 		if p.VramAddress < 0x2000 {
 			// MMC2 latch trigger
-			t := p.bgPatternTableAddress(p.Nametables.readNametableData(p.VramAddress))
-			triggerMapperLatch(t)
+			if v, ok := rom.(*Mmc2); ok {
+				t := p.bgPatternTableAddress(p.Nametables.readNametableData(p.VramAddress))
+				v.LatchTrigger(t)
+			}
 		}
 	}
 
@@ -628,40 +628,42 @@ func (p *Ppu) bgPatternTableAddress(i Word) int {
 	return (int(i) << 4) | (p.VramAddress >> 12) | a
 }
 
+func (p *Ppu) fetchTileAttributes() (uint16, uint16, Word) {
+	attrAddr := 0x23C0 | (p.VramAddress & 0xC00) | int(p.AttributeLocation[p.VramAddress&0x3FF])
+	shift := p.AttributeShift[p.VramAddress&0x3FF]
+	attr := ((p.Nametables.readNametableData(attrAddr) >> shift) & 0x03) << 2
+
+	index := p.Nametables.readNametableData(p.VramAddress)
+	t := p.bgPatternTableAddress(index)
+
+	// Flip bit 10 on wraparound
+	if p.VramAddress&0x1F == 0x1F {
+		// If rendering is enabled, at the end of a scanline
+		// copy bits 10 and 4-0 from VRAM latch into VRAMADDR
+		p.VramAddress ^= 0x41F
+	} else {
+		p.VramAddress++
+	}
+
+	// MMC2 latch trigger
+	// TODO: Should be a generic hook, the branch here
+	// is too slow
+
+	return uint16(rom.ReadVram(t)), uint16(rom.ReadVram(t + 8)), attr
+}
+
 func (p *Ppu) renderTileRow() {
 	// Generates each tile, one scanline at a time
 	// and applies the palette
 
 	// Load first two tiles into shift registers at start, then load
 	// one per loop and shift the other back out
-	fetchTileAttributes := func() (uint16, uint16, Word) {
-		attrAddr := 0x23C0 | (p.VramAddress & 0xC00) | int(p.AttributeLocation[p.VramAddress&0x3FF])
-		shift := p.AttributeShift[p.VramAddress&0x3FF]
-		attr := ((p.Nametables.readNametableData(attrAddr) >> shift) & 0x03) << 2
-
-		index := p.Nametables.readNametableData(p.VramAddress)
-		t := p.bgPatternTableAddress(index)
-
-		// Flip bit 10 on wraparound
-		if p.VramAddress&0x1F == 0x1F {
-			// If rendering is enabled, at the end of a scanline
-			// copy bits 10 and 4-0 from VRAM latch into VRAMADDR
-			p.VramAddress ^= 0x41F
-		} else {
-			p.VramAddress++
-		}
-
-		// MMC2 latch trigger
-		triggerMapperLatch(p.bgPatternTableAddress(index))
-
-		return uint16(p.Vram[t]), uint16(p.Vram[t+8]), attr
-	}
 
 	// Move first tile into shift registers
-	low, high, attr := fetchTileAttributes()
+	low, high, attr := p.fetchTileAttributes()
 	p.LowBitShift, p.HighBitShift = low, high
 
-	low, high, attrBuf := fetchTileAttributes()
+	low, high, attrBuf := p.fetchTileAttributes()
 	// Get second tile, move the pixels into the right side of
 	// shift registers
 	// Current tile to render is attrBuf
@@ -674,37 +676,37 @@ func (p *Ppu) renderTileRow() {
 		var b uint
 		for b = 0; b < 8; b++ {
 			fbRow := p.Scanline*256 + ((x * 8) + int(b))
+			px := &p.Palettebuffer[fbRow]
 
-			pixel := (p.LowBitShift >> (15 - b - uint(p.FineX))) & 0x01
-			pixel += ((p.HighBitShift >> (15 - b - uint(p.FineX)) & 0x01) << 1)
-
-			// If we're grabbing the pixel from the high
-			// part of the shift register, use the buffered
-			// palette, not the current one
-			if (15 - b - uint(p.FineX)) < 8 {
-				palette = p.bgPaletteEntry(attrBuf, pixel)
-			} else {
-				palette = p.bgPaletteEntry(attr, pixel)
-			}
-
-			if p.Palettebuffer[fbRow].Value != 0 {
+			if px.Value != 0 {
 				// Pixel is already rendered and priority
 				// 1 means show behind background
 				continue
 			}
 
-			p.Palettebuffer[fbRow] = Pixel{
-				PaletteRgb[palette%64],
-				int(pixel),
-				-1,
+			current := (15 - b - uint(p.FineX))
+			pixel := (p.LowBitShift >> current) & 0x01
+			pixel += ((p.HighBitShift >> current) & 0x01) << 1
+
+			// If we're grabbing the pixel from the high
+			// part of the shift register, use the buffered
+			// palette, not the current one
+			if current < 8 {
+				palette = p.bgPaletteEntry(attrBuf, pixel)
+			} else {
+				palette = p.bgPaletteEntry(attr, pixel)
 			}
+
+			px.Color = PaletteRgb[palette%64]
+			px.Value = int(pixel)
+			px.Pindex = -1
 		}
 
 		// xcoord = p.VramAddress & 0x1F
 		attr = attrBuf
 
 		// Shift the first tile out, bring the new tile in
-		low, high, attrBuf = fetchTileAttributes()
+		low, high, attrBuf = p.fetchTileAttributes()
 
 		p.LowBitShift = (p.LowBitShift << 8) | low
 		p.HighBitShift = (p.HighBitShift << 8) | high
@@ -746,8 +748,8 @@ func (p *Ppu) evaluateScanlineSprites(line int) {
 				s := p.sprPatternTableAddress(int(t))
 				var tile []Word
 
-				top := p.Vram[s : s+16]
-				bottom := p.Vram[s+16 : s+32]
+				top := rom.ReadTile(s)
+				bottom := rom.ReadTile(s + 16)
 
 				if c > 7 && yflip {
 					tile = top
@@ -771,7 +773,7 @@ func (p *Ppu) evaluateScanlineSprites(line int) {
 			} else {
 				// 8x8 Sprite
 				s := p.sprPatternTableAddress(int(t))
-				tile := p.Vram[s : s+16]
+				tile := rom.ReadTile(s)
 
 				p.decodePatternTile([]Word{tile[c], tile[c+8]},
 					int(p.XCoordinates[i]),
@@ -822,21 +824,22 @@ func (p *Ppu) decodePatternTile(t []Word, x, y int, palIndex uint, attr *Word, s
 		// Set the color of the pixel in the buffer
 		//
 		if fbRow < 0xF000 && !trans {
+			px := &p.Palettebuffer[fbRow]
 			priority := (*attr >> 5) & 0x1
 
 			hit := (Ram[0x2002]&0x40 == 0x40)
-			if p.Palettebuffer[fbRow].Value != 0 && spZero && !hit {
+			if px.Value != 0 && spZero && !hit {
 				// Since we render background first, if we're placing an opaque
 				// pixel here and the existing pixel is opaque, we've hit
 				// Sprite 0
 				p.setStatus(StatusSprite0Hit)
 			}
 
-			if p.Palettebuffer[fbRow].Pindex > -1 && p.Palettebuffer[fbRow].Pindex < index {
+			if px.Pindex > -1 && px.Pindex < index {
 				// Pixel with a higher sprite priority (lower index)
 				// is already here, so don't render this pixel
 				continue
-			} else if p.Palettebuffer[fbRow].Value != 0 && priority == 1 {
+			} else if px.Value != 0 && priority == 1 {
 				// Pixel is already rendered and priority
 				// 1 means show behind background
 				// unless background pixel is not transparent
@@ -845,11 +848,9 @@ func (p *Ppu) decodePatternTile(t []Word, x, y int, palIndex uint, attr *Word, s
 
 			pal := p.PaletteRam[0x10+(palIndex*0x4)+uint(pixel)]
 
-			p.Palettebuffer[fbRow] = Pixel{
-				PaletteRgb[int(pal)%64],
-				int(pixel),
-				index,
-			}
+			px.Color = PaletteRgb[int(pal)%64]
+			px.Value = int(pixel)
+			px.Pindex = index
 		}
 	}
 }

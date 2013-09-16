@@ -3,6 +3,13 @@ package nes
 const (
 	BankUpper = iota
 	BankLower
+
+	Size1k  = 0x0400
+	Size2k  = 0x0800
+	Size4k  = 0x1000
+	Size8k  = 0x2000
+	Size16k = 0x4000
+	Size32k = 0x8000
 )
 
 type Mmc1 struct {
@@ -16,10 +23,28 @@ type Mmc1 struct {
 
 	Buffer        int
 	BufferCounter uint
+	PrgLowerBank  int
+	PrgUpperBank  int
 	PrgSwapBank   int
 	PrgBankSize   int
 	ChrBankSize   int
+	ChrLowerBank  int
+	ChrUpperBank  int
 	Mirroring     int
+}
+
+func NewMmc1(r *Nrom) *Mmc1 {
+	return &Mmc1{
+		RomBanks:     r.RomBanks,
+		VromBanks:    r.VromBanks,
+		PrgBankCount: r.PrgBankCount,
+		ChrRomCount:  r.ChrRomCount,
+		Battery:      r.Battery,
+		Data:         r.Data,
+		PrgSwapBank:  BankLower,
+		PrgUpperBank: len(r.RomBanks) - 1,
+		ChrUpperBank: len(r.VromBanks) - 1,
+	}
 }
 
 func (m *Mmc1) Write(v Word, a int) {
@@ -44,6 +69,39 @@ func (m *Mmc1) Write(v Word, a int) {
 			m.Buffer = 0
 		}
 	}
+}
+
+func (m *Mmc1) Read(a int) Word {
+	if a >= 0xC000 {
+		return m.RomBanks[m.PrgUpperBank][a&0x3FFF]
+	}
+
+	return m.RomBanks[m.PrgLowerBank][a&0x3FFF]
+}
+
+func (m *Mmc1) WriteVram(v Word, a int) {
+	if a >= 0x1000 {
+		m.VromBanks[m.ChrUpperBank][a&0xFFF] = v
+		return
+	}
+
+	m.VromBanks[m.ChrLowerBank][a&0xFFF] = v
+}
+
+func (m *Mmc1) ReadVram(a int) Word {
+	if a >= 0x1000 {
+		return m.VromBanks[m.ChrUpperBank][a&0xFFF]
+	}
+
+	return m.VromBanks[m.ChrLowerBank][a&0xFFF]
+}
+
+func (m *Mmc1) ReadTile(a int) []Word {
+	if a >= 0x1000 {
+		return m.VromBanks[m.ChrUpperBank][a&0xFFF : a&0xFFF+16]
+	}
+
+	return m.VromBanks[m.ChrLowerBank][a&0xFFF : a&0xFFF+16]
 }
 
 func (m *Mmc1) BatteryBacked() bool {
@@ -89,8 +147,8 @@ func (m *Mmc1) SetRegister(reg int, v int) {
 		case 0x1:
 			m.ChrBankSize = Size4k
 		}
-		// CHR Bank 0
 	case 1:
+		// CHR Bank 0
 		if m.ChrRomCount == 0 {
 			return
 		}
@@ -108,8 +166,8 @@ func (m *Mmc1) SetRegister(reg int, v int) {
 				bank = v & 0xF
 			}
 
-			WriteVramBank(m.VromBanks, bank, 0x0000, Size4k)
-			WriteVramBank(m.VromBanks, bank+1, 0x1000, Size4k)
+			m.ChrUpperBank = (bank & 0xFE) + 1
+			m.ChrLowerBank = (bank & 0xFE)
 		case Size4k:
 			// Swap 4k VROM
 			var bank int
@@ -119,10 +177,10 @@ func (m *Mmc1) SetRegister(reg int, v int) {
 			} else {
 				bank = v & 0xF
 			}
-			WriteVramBank(m.VromBanks, bank, 0x0, Size4k)
+			m.ChrLowerBank = bank
 		}
-		// CHR Bank 1
 	case 2:
+		// CHR Bank 1
 		if m.ChrRomCount == 0 {
 			return
 		}
@@ -137,31 +195,22 @@ func (m *Mmc1) SetRegister(reg int, v int) {
 			} else {
 				bank = v & 0xF
 			}
-			WriteVramBank(m.VromBanks, bank, 0x1000, Size4k)
-		}
-		// PRG Bank
-	case 3:
-		if m.PrgBankCount >= 32 {
-			//fmt.Println("32+ ROM banks")
-		} else if m.PrgBankCount >= 16 {
-			//fmt.Println("16+ ROM banks")
-		}
 
+			m.ChrUpperBank = bank
+		}
+	case 3:
+		// PRG Bank
 		switch m.PrgBankSize {
 		case Size32k:
 			// Swap 32k ROM (in 32k mode, ignore first bit D0)
-			bank := ((v >> 0x1) & 0x7) * 2
-
-			WriteRamBank(m.RomBanks, bank, 0x8000, Size16k)
-			WriteRamBank(m.RomBanks, bank+1, 0xC000, Size16k)
+			m.PrgLowerBank = ((v >> 0x1) & 0x7) * 2
+			m.PrgUpperBank = m.PrgLowerBank + 1
 		case Size16k:
 			// Swap 16k ROM
-			bank := v & 0xF
-
 			if m.PrgSwapBank == BankUpper {
-				WriteRamBank(m.RomBanks, bank, 0xC000, Size16k)
+				m.PrgUpperBank = v & 0xF
 			} else {
-				WriteRamBank(m.RomBanks, bank, 0x8000, Size16k)
+				m.PrgLowerBank = v & 0xF
 			}
 		}
 	}
