@@ -1,9 +1,5 @@
 package nes
 
-import (
-	"fmt"
-)
-
 type Word uint8
 
 type Memory []Word
@@ -47,10 +43,6 @@ func (m Memory) WriteMirroredRam(v Word, a int) {
 
 func (m Memory) Write(address interface{}, val Word) error {
 	if a, err := fitAddressSize(address); err == nil {
-		if a >= 0x2008 && a < 0x4000 {
-			fmt.Printf("Address write: 0x%X\n", a)
-		}
-
 		if a >= 0x2000 && a <= 0x2007 {
 			ppu.RegWrite(val, a)
 			// m.WriteMirroredRam(val, a)
@@ -102,6 +94,11 @@ func (m Memory) Read(a uint16) (Word, error) {
 		return apu.RegRead(int(a))
 	case a >= 0x8000 && a <= 0xFFFF:
 		return rom.Read(int(a)), nil
+	case a >= 0x5100 && a <= 0x6000:
+		if _, ok := rom.(*Mmc5); ok {
+			// MMC5 register handling
+			return rom.Read(int(a)), nil
+		}
 	}
 
 	return m[a], nil

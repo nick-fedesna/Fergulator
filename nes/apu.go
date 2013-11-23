@@ -10,11 +10,11 @@ const (
 )
 
 var (
-	SquareLookup = [][]int{
-		[]int{0, 1, 0, 0, 0, 0, 0, 0},
-		[]int{0, 1, 1, 0, 0, 0, 0, 0},
-		[]int{0, 1, 1, 1, 1, 0, 0, 0},
-		[]int{1, 0, 0, 1, 1, 1, 1, 1},
+	SquareLookup = []int{
+		0, 1, 0, 0, 0, 0, 0, 0,
+		0, 1, 1, 0, 0, 0, 0, 0,
+		0, 1, 1, 1, 1, 0, 0, 0,
+		1, 0, 0, 1, 1, 1, 1, 1,
 	}
 
 	TriangleLookup = []int16{
@@ -163,8 +163,8 @@ func (s *Square) WriteControl(v Word) {
 
 func (s *Square) WriteSweeps(v Word) {
 	s.SweepEnabled = v&0x80 == 0x80
-	s.SweepPeriod = (v & 0x7) >> 4
-	s.SweepMode = (v & 1) >> 3
+	s.SweepPeriod = (v >> 4) & 0x7
+	s.SweepMode = (v >> 3) & 1
 	s.Negative = v&0x10 == 0x10
 	s.Shift = v & 0x7
 
@@ -200,7 +200,7 @@ func (s *Square) Clock() {
 
 		if s.Timer < 8 {
 			s.UpdateSample(0)
-		} else if SquareLookup[s.DutyCycle][s.DutyCount] == 1 {
+		} else if SquareLookup[(s.DutyCycle*8)+s.DutyCount] == 1 {
 			s.UpdateSample(int16(s.Volume))
 		} else {
 			s.UpdateSample(0)
